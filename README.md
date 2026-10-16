@@ -1,152 +1,103 @@
-# service-template
+# lasso-caddy
 
-_Status: starter template repo_
+`lasso-caddy` is the canonical Service Lasso service repo for the core `@caddy` service. It compiles a custom Caddy build (Caddy + the Service Lasso admin API plugin) and publishes it as a release-backed Service Lasso service.
 
-`service-template` is the canonical starting point for new Service Lasso service repos.
+In the baseline routing stack it runs as a foreground **HTTP-to-FastCGI protocol translator sidecar** with a **Service Lasso admin API**:
 
-Use this repo when you want to create a new service repo that already has:
-- the expected service repo layout
-- a starter `service.json`
-- a starter `services/` inventory example for app/reference repos that embed Service Lasso
-- starter packaging scripts
-- starter verify scripts and harness contract shape
-- starter docs for service contract, packaging, and validation
-- starter CI scaffolding
-- documented GitHub-template-first repo bootstrap flow
-- runtime extension guidance for compiled daemons, Node services, and bootstrap/system services
-
-## Use this template
-
-Recommended flow:
-
-1. Create the new GitHub repo **through GitHub's template mechanism** from `service-lasso/service-template`.
-   - GitHub UI: click **Use this template** on this repo.
-   - GitHub CLI: `gh repo create service-lasso/<repo-name> --public --template service-lasso/service-template`.
-2. Verify GitHub recorded the origin:
-
-   ```powershell
-   gh api repos/service-lasso/<repo-name> --jq '.template_repository.full_name'
-   # must print: service-lasso/service-template
-   ```
-
-3. Clone the new GitHub-created repo locally.
-4. Rename the sample service files/content for the real service.
-5. Replace the sample runtime payload with the real service payload.
-6. Update `service.json`, `verify/service-harness.json`, workflows, package/test/verify scripts, and docs for the new service.
-7. Run the local package + test flow.
-8. Open a focused PR and wait for `validate-template` to pass on Windows/Linux/macOS.
-
-Do **not** start from a local copy or another service repo and retrofit the template later. File parity is not enough; the GitHub repo itself must show it was generated from `service-lasso/service-template`.
-
-See `docs/bootstrap-new-service-repo.md` for the full GitHub-template-first checklist and remediation process for incorrectly-created repos.
-
-## Quick start
-
-### Local package
-
-```powershell
-pwsh -NoLogo -NoProfile -File .\scripts\package.ps1
+```text
+Traefik  --HTTP-->  Caddy  --FastCGI-->  Nextcloud (php-cgi / php-fpm)
+                       ^
+        Service Lasso --|  POST /service-lasso/register  (127.0.0.1:2019)
 ```
 
-### Local tests
+This resolves the Traefik FastCGI proxy limitation while keeping `lasso-nextcloud` as a single managed process. Caddy terminates plain HTTP from Traefik and translates it into the binary FastCGI protocol expected by the Nextcloud PHP backend.
 
-```powershell
-pwsh -NoLogo -NoProfile -File .\scripts\test.ps1
+## Custom build
+
+The binary is not stock Caddy. `scripts/build-caddy.mjs` uses [`xcaddy`](https://github.com/caddyserver/xcaddy) to compile Caddy with the in-repo plugin:
+
+```text
+github.com/caddyserver/caddy/v2   +   github.com/service-lasso/lasso-caddy/plugin
 ```
 
-## Start here for deeper design context
+A Go toolchain is required. If `xcaddy` is not on `PATH` it is installed into `output/tools` automatically.
 
-Read in this order if you need the underlying design/spec context:
+## Service Lasso admin API
 
-1. `docs/openspec-drafts/SPEC-SERVICE-TEMPLATE-REPO.md`
-2. `docs/openspec-drafts/OPENSPEC-TRACKER.md`
-3. `docs/service-contract.md`
-4. `docs/service-json-reference.md`
-5. `docs/packaging.md`
-6. `docs/validation.md`
-7. `docs/bootstrap-new-service-repo.md`
-8. `docs/runtime-extension-points.md`
-9. `docs/reference/adjacent/SPEC-SERVICE-LASSO-HARNESS.md`
+The plugin registers the `admin.api.lasso` module and mounts two endpoints on the Caddy admin listener (loopback only):
 
-## What is here
+### `POST /service-lasso/register`
 
-### OpenSpec drafts
-- `docs/openspec-drafts/SPEC-SERVICE-TEMPLATE-REPO.md`
-- `docs/openspec-drafts/OPENSPEC-TRACKER.md`
+```json
+{
+  "id": "@nextcloud",
+  "domain": "nextcloud.servicelasso.localhost",
+  "ingress_port": 50123,
+  "type": "fastcgi",
+  "target": "127.0.0.1:61124",
+  "root": "/absolute/path/to/lasso-nextcloud/src"
+}
+```
 
-### Supporting reference/planning docs
-- `docs/service-contract.md`
-- `docs/service-json-reference.md`
-- `docs/packaging.md`
-- `docs/validation.md`
-- `docs/reference/SERVICE-TEMPLATE-REPO.md`
-- `docs/reference/SERVICE-STRUCTURE-REVIEW.md`
-- `docs/reference/PROPOSED-CODEBASE-STRUCTURE.md`
-- `docs/reference/DECISION-CONTEXT.md`
-- `docs/reference/shared-runtime/QUESTION-LIST-AND-CODE-VALIDATION.md`
-- `docs/reference/shared-runtime/ARCHITECTURE-DECISIONS.md`
-- `docs/reference/shared-runtime/SERVICE-MANAGER-BEHAVIOR.md`
-- `docs/reference/adjacent/SPEC-SERVICE-LASSO-HARNESS.md`
-- `docs/reference/EXAMPLE-REPO-TREE.md`
-- `docs/reference/EXAMPLE-service.json`
-- `docs/reference/EXAMPLE-service-harness.json`
-- `docs/reference/EXAMPLE-verify.ps1`
-- `docs/reference/EXAMPLE-verify.sh`
+`type` is `fastcgi` (requires `root`) or `http`. Registration:
 
-## Purpose
+- points the managed server (`lasso_ingress`) listener at the dynamically allocated `ingress_port` (bound to `127.0.0.1` so the OS does not prompt for a host firewall exception);
+- injects or replaces the route keyed by `@id` = `lasso:<id>`, matched on `domain`, with the upstream set to `target`;
+- disables automatic HTTPS on the server so no certificates are provisioned;
+- hot-reloads the running config via `caddy.Load`, so there is zero downtime.
 
-This repo is the canonical starting point for Service Lasso service repos.
+Re-registering an existing `id` updates that route in place without duplicating the route array.
 
-Its role is to define:
-- one-service-per-repo expectations
-- service repo layout
-- service author documentation expectations
-- sample service expectations
-- packaging/release expectations
-- validation-harness integration expectations
+### `POST /service-lasso/unregister`
 
-## Current status
+```json
+{ "id": "@nextcloud" }
+```
 
-This repo is usable now as a starter template.
+Removes the route for `id`. Removing an unknown id is a no-op.
 
-It currently includes:
-- actual starter repo files (`service.json`, `verify/`, `scripts/`, `runtime/`, `config/`, `.github/workflows/`)
-- a tracked example `services/` inventory for downstream app/reference repos
-- a packaged first-pass sample artifact at `dist/echo-service-win32.zip`
-- a starter multi-OS GitHub Actions workflow that packages release archives and runs basic tests
-- starter harness-contract files and thin verify wrappers
-- supporting reference/spec docs for deeper design work
+Both endpoints return `{"status":"success"}` on success. Validation failures return `400`, mutation failures `422`, and a rejected `caddy.Load` returns `500` while leaving the previous routing state untouched (fail-closed).
 
-Important current validation note:
-- the pipeline now downloads and invokes the released `service-lasso-harness` binary in CI
-- it still keeps the starter local package/test flow alongside harness verification
-- the current harness version is pinned in workflow config and can be advanced intentionally over time
+## Service Lasso contract
 
-Important current manifest note:
-- the bounded first-pass core runtime now expects service release/install metadata to live directly in `service.json`
-- the current template example uses a bounded `artifact.kind`, `artifact.source`, and `artifact.platforms` shape to show that direction explicitly
-- bundled app artifacts mean the app package step has already acquired service archives into `services/<service-id>/.state/artifacts/<tag>/<assetName>` so first run can install without downloading those archives
+The service manifest declares:
 
-## Baseline app inventory rule
+- service id `@caddy`
+- dependency on the `nextcloud` service (`depend_on`)
+- a `web` HTTP endpoint (loopback, preferred port `8080`) that Traefik routes into
+- an `admin` HTTP endpoint (loopback, preferred port `2019`) for the admin API
+- a manifest-owned `runtime/caddy.json` base config generated during the `config` action
+- a `/health` readiness responder
+- `CADDY_HTTP_PORT`, `CADDY_URL`, `CADDY_ADMIN_PORT`, `CADDY_ADMIN_ADDR`, and `CADDY_ROOT` outputs
 
-This repo still models the canonical one-service-per-repo contract through the root `service.json`.
+## Release assets
 
-In addition, it now carries a tracked example `services/` inventory to show what app/reference repos should own when they embed Service Lasso.
+Each release publishes Caddy `2.11.7` archives built from this repo:
 
-Current baseline inventory:
-- `services/echo-service/service.json`
-- `services/@serviceadmin/service.json`
-- `services/@node/service.json`
-- `services/@localcert/service.json`
-- `services/@nginx/service.json`
-- `services/@traefik/service.json`
+- `lasso-caddy-2.11.7-win32.zip`
+- `lasso-caddy-2.11.7-linux.tar.gz`
+- `lasso-caddy-2.11.7-darwin.tar.gz`
+- `service.json`
+- `SHA256SUMS.txt`
 
-Optional provider inventory:
-- `services/@python/service.json` disabled release-backed Python 3.11.5 provider; Windows artifact only
-- `services/@java/service.json` disabled release-backed Java 17 provider
+Each archive contains the custom Caddy binary plus a `SERVICE-LASSO-PACKAGE.json` metadata file recording the Caddy version and the compiled plugin.
 
-Important rule:
-- app/reference repos should own the exact `services/` manifests for the services they intend to manage
-- if an app repo includes `@serviceadmin`, it should also include the manifests needed to satisfy Service Admin's declared service dependencies
-- core Service Lasso services use the `@` prefix: `@node`, `@python`, `@java`, `@localcert`, `@nginx`, `@traefik`, `@serviceadmin`, and `@secretsbroker`; `echo-service` stays unprefixed because it is the sample/test managed service
-- environment settings like `VITE_SERVICE_LASSO_API_BASE_URL` still belong in app/runtime config, not as extra service manifests
+## Local verification
+
+```powershell
+npm test
+```
+
+This builds the custom binary, packages and extracts it, runs `caddy version`, starts Caddy against a temporary base config, then exercises the admin API end-to-end: registers an HTTP upstream, confirms the domain routes to it, checks `/health`, unregisters, and confirms the route is gone.
+
+## Packaging
+
+```powershell
+npm run package
+```
+
+Override the target platform or upstream Caddy version when needed:
+
+```powershell
+$env:TARGET_PLATFORM = "linux"; $env:CADDY_VERSION = "2.11.7"; npm run package
+```
