@@ -13,6 +13,91 @@ Client / router  --HTTP-->  Caddy  --FastCGI-->  PHP app (php-fpm / php-cgi)
 
 Routes are not hard-coded: Service Lasso registers and unregisters upstreams at runtime, so the same `@caddy` instance can front any local app that is installed or started.
 
+## Architecture
+
+One shared `@caddy` instance serves every service that declares ingress. Traefik owns the public edge (domains + HTTPS termination); Caddy is the internal, loopback-only HTTP-to-FastCGI translator.
+
+```mermaid
+flowchart LR
+    U["Client<br/>HTTPS :443"]
+    T["Traefik<br/>TLS termination + Host routing"]
+    C["@caddy (shared)<br/>HTTP to FastCGI<br/>127.0.0.1:8080 · admin 127.0.0.1:2019"]
+    NC["@nextcloud<br/>php-cgi / php-fpm :9000"]
+    WP["@wordpress<br/>php-fpm :9001"]
+    E["echo-service<br/>HTTP :4010"]
+    N["@node-app<br/>HTTP :3000"]
+    A["@serviceadmin<br/>HTTP :17700"]
+    S["Service Lasso Core<br/>lifecycle + ingress fan-out"]
+
+    U --> T
+    T -->|"nextcloud.servicelasso.localhost"| C
+    T -->|"wordpress.servicelasso.localhost"| C
+    T -->|"echo-service.servicelasso.localhost"| E
+    T -->|"app.servicelasso.localhost"| N
+    T -->|"admin.servicelasso.localhost"| A
+
+    C -->|"FastCGI"| NC
+    C -->|"FastCGI"| WP
+
+    S -.->|"POST /service-lasso/register"| C
+    S -.->|"write Traefik dynamic.yml routers"| T
+```
+
+```text
+                          +-----------------------------------------------+
+ Client --HTTPS 443------>| Traefik   (TLS termination + Host(domain))    |
+                          +-------+---------------+---------------+-------+
+                                  |               |               |
+        Host(nextcloud...)        |   Host(echo...)               |  Host(app...)
+                                  v               v               v
+                    +-----------------------+   +----------+   +----------+
+                    | @caddy (shared)       |   | echo-svc |   | node-app |
+                    | 127.0.0.1:8080        |   | :4010    |   | :3000    |
+                    | admin :2019           |   +----------+   +----------+
+                    +------+--------+-------+
+                           |        |
+              FastCGI :9000|        |FastCGI :9001
+                           v        v
+                    +----------+ +-----------+
+                    |nextcloud | |wordpress  |
+                    +----------+ +-----------+
+
+ Service Lasso Core
+   |- POST /service-lasso/register  -> @caddy admin (FastCGI routes)
+   +- write dynamic.yml routers     -> Traefik (Host(domain) + TLS)
+```
+
+Two paths:
+
+- **FastCGI services** (`nextcloud`, `wordpress`): Traefik terminates TLS and forwards `Host(domain)` to the shared `@caddy`, which translates to the FastCGI upstream.
+- **HTTP services** (`echo-service`, node app, serviceadmin): Traefik routes `Host(domain)` straight to the service endpoint; Caddy is not involved.
+
+## Ingress contract
+
+A service opts in by declaring one or more ingress entries. `domain` is consumed by Traefik (Host + TLS) and by Caddy for host matching; `proxy` is consumed by Caddy. Every registration uses the shared Caddy web port, never a per-service port.
+
+```json
+"ingress": [
+  {
+    "domain": "nextcloud.servicelasso.localhost",
+    "proxy": {
+      "type": "fastcgi",
+      "endpoint": "fastcgi",
+      "root": "${NEXTCLOUD_SOURCE_DIR}"
+    }
+  }
+]
+```
+
+```json
+"ingress": [
+  {
+    "domain": "echo-service.servicelasso.localhost",
+    "proxy": { "type": "http", "endpoint": "service" }
+  }
+]
+```
+
 ## What it can front
 
 Two upstream types are supported by the admin API.
