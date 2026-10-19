@@ -4,9 +4,6 @@
   "description": "Core release-backed Caddy HTTP-to-FastCGI translator sidecar with a Service Lasso admin API for dynamically registering upstream services.",
   "version": "2.11.7",
   "enabled": true,
-  "depend_on": [
-    "nextcloud"
-  ],
   "endpoints": [
     {
       "id": "web",

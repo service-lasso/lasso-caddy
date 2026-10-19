@@ -63,7 +63,6 @@ Both endpoints return `{"status":"success"}` on success. Validation failures ret
 The service manifest declares:
 
 - service id `@caddy`
-- dependency on the `nextcloud` service (`depend_on`)
 - a `web` HTTP endpoint (loopback, preferred port `8080`) that Traefik routes into
 - an `admin` HTTP endpoint (loopback, preferred port `2019`) for the admin API
 - a manifest-owned `runtime/caddy.json` base config generated during the `config` action

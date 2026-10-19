@@ -194,8 +194,8 @@ if (serviceManifest.id !== "@caddy" || serviceManifest.version !== caddyVersion)
   throw new Error(`Unexpected service manifest identity: ${JSON.stringify({ id: serviceManifest.id, version: serviceManifest.version })}`);
 }
 
-if (!Array.isArray(serviceManifest.depend_on) || !serviceManifest.depend_on.includes("nextcloud")) {
-  throw new Error(`Caddy service.json must declare a nextcloud dependency: ${JSON.stringify(serviceManifest.depend_on)}`);
+if (Array.isArray(serviceManifest.depend_on) && serviceManifest.depend_on.length > 0) {
+  throw new Error(`Caddy service.json must not declare service dependencies: ${JSON.stringify(serviceManifest.depend_on)}`);
 }
 
 if ("healthcheck" in serviceManifest) {
