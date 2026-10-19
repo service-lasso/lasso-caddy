@@ -2,15 +2,41 @@
 
 `lasso-caddy` is the canonical Service Lasso service repo for the core `@caddy` service. It compiles a custom Caddy build (Caddy + the Service Lasso admin API plugin) and publishes it as a release-backed Service Lasso service.
 
-In the baseline routing stack it runs as a foreground **HTTP-to-FastCGI protocol translator sidecar** with a **Service Lasso admin API**:
+Caddy runs in the foreground as a generic **HTTP front / protocol translator** with a **Service Lasso admin API**. It accepts plain HTTP and forwards each domain to the right upstream, using either the **FastCGI** protocol or a standard **HTTP reverse proxy**:
 
 ```text
-Traefik  --HTTP-->  Caddy  --FastCGI-->  Nextcloud (php-cgi / php-fpm)
-                       ^
-        Service Lasso --|  POST /service-lasso/register  (127.0.0.1:2019)
+Client / router  --HTTP-->  Caddy  --FastCGI-->  PHP app (php-fpm / php-cgi)
+                                   \--HTTP----->  HTTP app (Node, Python, Go, Java, .NET, ...)
+                        ^
+         Service Lasso --|  POST /service-lasso/register  (127.0.0.1:2019)
 ```
 
-This resolves the Traefik FastCGI proxy limitation while keeping `lasso-nextcloud` as a single managed process. Caddy terminates plain HTTP from Traefik and translates it into the binary FastCGI protocol expected by the Nextcloud PHP backend.
+Routes are not hard-coded: Service Lasso registers and unregisters upstreams at runtime, so the same `@caddy` instance can front any local app that is installed or started.
+
+## What it can front
+
+Two upstream types are supported by the admin API.
+
+### `type: "fastcgi"`
+
+For applications served by a FastCGI process manager. The common case is PHP:
+
+- **PHP-CGI / PHP-FPM** applications: Nextcloud, ownCloud, WordPress, Drupal, Joomla, Laravel, Symfony, Magento / Adobe Commerce, MediaWiki, Moodle, phpMyAdmin, Matomo, Kimai, and similar.
+- Any other backend that speaks FastCGI. Script splitting currently uses `.php`, so non-PHP FastCGI runtimes may need a different split path.
+
+### `type: "http"`
+
+For anything that already speaks HTTP (including WebSockets, which `reverse_proxy` upgrades automatically):
+
+- Node.js (Express, Fastify, NestJS, Next)
+- Python (uvicorn / gunicorn / ASGI / WSGI served over HTTP)
+- Go (`net/http`, chi, Gin, Echo)
+- Java (Spring Boot, servlet containers)
+- .NET / ASP.NET Core (Kestrel)
+- Ruby (Puma, Unicorn), Rust (axum, actix-web)
+- Static file servers and internal admin/metrics endpoints
+
+The translator is what lets Service Lasso expose a FastCGI-only backend (such as a PHP app) through a normal HTTP router without teaching the router the FastCGI protocol.
 
 ## Custom build
 
@@ -28,14 +54,28 @@ The plugin registers the `admin.api.lasso` module and mounts two endpoints on th
 
 ### `POST /service-lasso/register`
 
+FastCGI upstream:
+
 ```json
 {
-  "id": "@nextcloud",
-  "domain": "nextcloud.servicelasso.localhost",
+  "id": "@wordpress",
+  "domain": "wordpress.servicelasso.localhost",
   "ingress_port": 50123,
   "type": "fastcgi",
   "target": "127.0.0.1:61124",
-  "root": "/absolute/path/to/lasso-nextcloud/src"
+  "root": "/absolute/path/to/wordpress"
+}
+```
+
+HTTP upstream:
+
+```json
+{
+  "id": "@node-app",
+  "domain": "app.servicelasso.localhost",
+  "ingress_port": 50124,
+  "type": "http",
+  "target": "127.0.0.1:3000"
 }
 ```
 
@@ -51,7 +91,7 @@ Re-registering an existing `id` updates that route in place without duplicating 
 ### `POST /service-lasso/unregister`
 
 ```json
-{ "id": "@nextcloud" }
+{ "id": "@wordpress" }
 ```
 
 Removes the route for `id`. Removing an unknown id is a no-op.
@@ -63,11 +103,13 @@ Both endpoints return `{"status":"success"}` on success. Validation failures ret
 The service manifest declares:
 
 - service id `@caddy`
-- a `web` HTTP endpoint (loopback, preferred port `8080`) that Traefik routes into
+- a `web` HTTP endpoint (loopback, preferred port `8080`) that the router routes into
 - an `admin` HTTP endpoint (loopback, preferred port `2019`) for the admin API
 - a manifest-owned `runtime/caddy.json` base config generated during the `config` action
 - a `/health` readiness responder
 - `CADDY_HTTP_PORT`, `CADDY_URL`, `CADDY_ADMIN_PORT`, `CADDY_ADMIN_ADDR`, and `CADDY_ROOT` outputs
+
+`@caddy` declares no service dependencies: it is a generic front that is configured entirely through the admin API.
 
 ## Release assets
 
