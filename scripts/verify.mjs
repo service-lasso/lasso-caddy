@@ -11,7 +11,8 @@ const platform = process.env.TARGET_PLATFORM ?? process.platform;
 const caddyVersion = process.env.CADDY_VERSION ?? "2.11.7";
 
 const pluginModule = "github.com/service-lasso/lasso-caddy/plugin";
-const testDomain = "e2e.servicelasso.localhost";
+const domainAlpha = "echo-alpha.servicelasso.localhost";
+const domainBravo = "echo-bravo.servicelasso.localhost";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -156,10 +157,10 @@ async function waitForAdmin(port, timeoutMs = 20_000) {
   throw lastError ?? new Error("Timed out waiting for the Caddy admin API.");
 }
 
-async function startStubUpstream(port) {
+async function startStubUpstream(port, body) {
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { "content-type": "text/plain" });
-    res.end("stub-ok");
+    res.end(body);
   });
   await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
   return server;
@@ -300,7 +301,8 @@ run(binaryPath, ["version"]);
 const httpPort = await reserveLoopbackPort();
 const adminPort = await reserveLoopbackPort();
 const ingressPort = await reserveLoopbackPort();
-const stubPort = await reserveLoopbackPort();
+const alphaPort = await reserveLoopbackPort();
+const bravoPort = await reserveLoopbackPort();
 const renderContext = { serviceRoot, httpPort, adminPort };
 
 await mkdir(runtimeRoot, { recursive: true });
@@ -310,7 +312,8 @@ await writeFile(
   "utf8",
 );
 
-const stub = await startStubUpstream(stubPort);
+const alpha = await startStubUpstream(alphaPort, "hello from echo-alpha");
+const bravo = await startStubUpstream(bravoPort, "hello from echo-bravo");
 
 const commandline = serviceManifest.commandline?.[platform] ?? serviceManifest.commandline?.default;
 const args = parseCommandlineArgs(renderServiceText(commandline, renderContext));
@@ -333,33 +336,36 @@ try {
   await waitForAdmin(adminPort);
   console.error("[step] admin ready");
 
-  const beforeRegister = await httpRequest({ port: httpPort, host: testDomain });
-  if (beforeRegister.body.includes("stub-ok")) {
+  const beforeRegister = await httpRequest({ port: httpPort, host: domainAlpha });
+  if (beforeRegister.body.includes("hello from echo-alpha")) {
     throw new Error("domain was already routed before registration");
   }
   console.error("[step] pre-registration probe ok");
 
-  const register = await postJson({
-    port: adminPort,
-    urlPath: "/service-lasso/register",
-    payload: {
-      id: "@e2e-stub",
-      domain: testDomain,
-      ingress_port: ingressPort,
-      type: "http",
-      target: `127.0.0.1:${stubPort}`,
-    },
-  });
-  if (register.status !== 200 || !register.body.includes("success")) {
-    throw new Error(`register failed: ${register.status} ${register.body}`);
+  for (const [id, domain, target] of [
+    ["@e2e-alpha", domainAlpha, `127.0.0.1:${alphaPort}`],
+    ["@e2e-bravo", domainBravo, `127.0.0.1:${bravoPort}`],
+  ]) {
+    const register = await postJson({
+      port: adminPort,
+      urlPath: "/service-lasso/register",
+      payload: { id, domain, ingress_port: ingressPort, type: "http", target },
+    });
+    if (register.status !== 200 || !register.body.includes("success")) {
+      throw new Error(`register failed for ${id}: ${register.status} ${register.body}`);
+    }
   }
   console.error("[step] register ok");
 
-  const routed = await httpRequest({ port: ingressPort, host: testDomain });
-  if (routed.status !== 200 || routed.body.trim() !== "stub-ok") {
-    throw new Error(`registered domain did not route to the upstream: ${routed.status} ${JSON.stringify(routed.body)}`);
+  const alphaRouted = await httpRequest({ port: ingressPort, host: domainAlpha });
+  if (alphaRouted.status !== 200 || alphaRouted.body.trim() !== "hello from echo-alpha") {
+    throw new Error(`alpha did not route to its own upstream: ${alphaRouted.status} ${JSON.stringify(alphaRouted.body)}`);
   }
-  console.error("[step] routed to upstream ok");
+  const bravoRouted = await httpRequest({ port: ingressPort, host: domainBravo });
+  if (bravoRouted.status !== 200 || bravoRouted.body.trim() !== "hello from echo-bravo") {
+    throw new Error(`bravo did not route to its own upstream: ${bravoRouted.status} ${JSON.stringify(bravoRouted.body)}`);
+  }
+  console.error("[step] host-matched self-proxy ok");
 
   const health = await httpRequest({ port: ingressPort, urlPath: "/health" });
   if (health.status !== 200 || health.body.trim() !== "ok") {
@@ -370,16 +376,21 @@ try {
   const unregister = await postJson({
     port: adminPort,
     urlPath: "/service-lasso/unregister",
-    payload: { id: "@e2e-stub" },
+    payload: { id: "@e2e-alpha" },
   });
   if (unregister.status !== 200 || !unregister.body.includes("success")) {
     throw new Error(`unregister failed: ${unregister.status} ${unregister.body}`);
   }
 
-  const afterUnregister = await httpRequest({ port: ingressPort, host: testDomain });
-  if (afterUnregister.body.includes("stub-ok")) {
-    throw new Error("domain still routed after unregistration");
+  const alphaAfter = await httpRequest({ port: ingressPort, host: domainAlpha });
+  if (alphaAfter.body.includes("hello from echo-alpha")) {
+    throw new Error("alpha domain still routed after removal");
   }
+  const bravoStill = await httpRequest({ port: ingressPort, host: domainBravo });
+  if (bravoStill.body.trim() !== "hello from echo-bravo") {
+    throw new Error("bravo route was disturbed by removing alpha");
+  }
+  console.error("[step] independent route removal ok");
 
   console.log("[lasso-caddy] verification passed");
 } catch (error) {
@@ -390,8 +401,16 @@ try {
   throw error;
 } finally {
   await stopCaddy(caddy);
-  await new Promise((resolve) => {
-    stub.closeAllConnections?.();
-    stub.close(() => resolve());
-  });
+  for (const server of [alpha, bravo]) {
+    await new Promise((resolve) => {
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
+  }
 }
+
+if (platform === "win32") {
+  console.error("[step] fastcgi end-to-end");
+  run("node", [path.join(repoRoot, "scripts", "e2e-fastcgi.mjs")]);
+}
+
